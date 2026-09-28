@@ -24,14 +24,16 @@ Graded by ``warg run utils grade-tests``: pass on the real code, 90% branch
 coverage, and fail on every broken copy in ``grader/mutants/``.
 """
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
+from src.types import Coordinate
 from src.waypoint_utils import (
     east_north_coordinate_offset_m,
     parse_waypoints_file,
     sort_clockwise_sweep,
 )
-from src.types import Coordinate
 
 # The helper and the test below are given to you.
 
@@ -88,9 +90,158 @@ def test_parse_waypoints_file_success(tmp_path, text, expected):
     assert parse_waypoints_file(path) == expected
 
 
-def test_placeholder():
-    # TODO(bootcamper): delete this and write real tests. It's only here so
-    # linter doesn't complain about unused imports before you start.
-    assert callable(east_north_coordinate_offset_m)
-    assert callable(parse_waypoints_file)
-    assert callable(sort_clockwise_sweep)
+@pytest.mark.parametrize("text", ["", "# empty", "{}", "waypoints: []", "home: null"])
+def test_empty_waypoint_inputs(tmp_path, text):
+    assert parse_waypoints_file(write_to_tmp_waypoints_file(tmp_path, text)) == (
+        None,
+        [],
+    )
+
+
+@pytest.mark.parametrize("text", ["[]", "hello", "42"])
+def test_top_level_must_be_mapping(tmp_path, text):
+    with pytest.raises(ValueError, match="expected a mapping"):
+        parse_waypoints_file(write_to_tmp_waypoints_file(tmp_path, text))
+
+
+@pytest.mark.parametrize("entry", ["{lat: 1}", "hello", "42"])
+def test_waypoints_must_be_list(tmp_path, entry):
+    with pytest.raises(ValueError, match="must be a list"):
+        parse_waypoints_file(
+            write_to_tmp_waypoints_file(tmp_path, "waypoints: " + entry)
+        )
+
+
+@pytest.mark.parametrize("location", ["home", "waypoint"])
+@pytest.mark.parametrize(
+    "entry, message",
+    [
+        ("hello", "must be a mapping"),
+        ("{lon: 2, alt: 3}", "missing key"),
+        ("{lat: 1, alt: 3}", "missing key"),
+        ("{lat: 1, lon: 2}", "missing key"),
+        ("{lat: nope, lon: 2, alt: 3}", "non-numeric"),
+        ("{lat: 1, lon: nope, alt: 3}", "non-numeric"),
+        ("{lat: 1, lon: 2, alt: null}", "non-numeric"),
+        ("{lat: 90.01, lon: 2, alt: 3}", "out of range"),
+        ("{lat: -90.01, lon: 2, alt: 3}", "out of range"),
+        ("{lat: 1, lon: 180.01, alt: 3}", "out of range"),
+        ("{lat: 1, lon: -180.01, alt: 3}", "out of range"),
+    ],
+)
+def test_invalid_coordinates(tmp_path, location, entry, message):
+    text = f"home: {entry}" if location == "home" else f"waypoints: [{entry}]"
+    with pytest.raises(ValueError, match=message):
+        parse_waypoints_file(write_to_tmp_waypoints_file(tmp_path, text))
+
+
+def test_invalid_yaml(tmp_path):
+    with pytest.raises(ValueError, match="invalid YAML"):
+        parse_waypoints_file(write_to_tmp_waypoints_file(tmp_path, "waypoints: ["))
+
+
+def test_missing_file(tmp_path):
+    with pytest.raises(OSError):
+        parse_waypoints_file(tmp_path / "missing.yaml")
+
+
+@pytest.mark.parametrize("lat, lon", [(90, 180), (-90, -180)])
+def test_coordinate_boundaries_and_numeric_strings(tmp_path, lat, lon):
+    text = f'waypoints: [{{lat: "{lat}", lon: "{lon}", alt: "-3.5"}}]'
+    home, points = parse_waypoints_file(write_to_tmp_waypoints_file(tmp_path, text))
+    assert home is None
+    assert points == [Coordinate(lat, lon, -3.5)]
+    assert isinstance(points[0].lat, float)
+
+
+@pytest.mark.parametrize("field", ["lat", "lon", "alt"])
+def test_parsed_coordinates_are_frozen(tmp_path, field):
+    home, points = parse_waypoints_file(
+        write_to_tmp_waypoints_file(
+            tmp_path,
+            "home: {lat: 1, lon: 2, alt: 3}\nwaypoints: [{lat: 4, lon: 5, alt: 6}]",
+        )
+    )
+    for coordinate in (home, points[0]):
+        with pytest.raises(FrozenInstanceError):
+            setattr(coordinate, field, 99)
+
+
+# One degree of arc on the specified mean-Earth sphere is 111195.0802 m.
+# East/west distance at latitude 60 is half the equatorial distance.
+@pytest.mark.parametrize(
+    "coordinates, expected",
+    [
+        ((0, 0, 0, 0), (0, 0)),
+        ((0, 0, 0, 1), (111195.0802, 0)),
+        ((0, 0, 1, 0), (0, 111195.0802)),
+        ((60, 10, 60, 11), (55597.5401, 0)),
+        ((60, 11, 60, 10), (-55597.5401, 0)),
+        ((1, 0, 0, 0), (0, -111195.0802)),
+        ((0, 0, 60, 1), (96297.7643, 6671704.8140)),
+    ],
+)
+def test_coordinate_offsets(coordinates, expected):
+    assert east_north_coordinate_offset_m(*coordinates) == pytest.approx(
+        expected, abs=0.01
+    )
+
+
+@pytest.mark.parametrize("points", [[], [Coordinate(1, 2, 3)]])
+def test_short_sweeps_return_a_copy(points):
+    result = sort_clockwise_sweep(points)
+    assert result == points
+    assert result is not points
+
+
+@pytest.fixture
+def compass():
+    return [
+        Coordinate(1, 0, 10),
+        Coordinate(0, 1, 20),
+        Coordinate(-1, 0, 30),
+        Coordinate(0, -1, 40),
+    ]
+
+
+def test_clockwise_from_north_without_mutating_input(compass):
+    north, east, south, west = compass
+    points = [south, west, east, north]
+    before = points.copy()
+    assert sort_clockwise_sweep(points) == compass
+    assert points == before
+
+
+@pytest.mark.parametrize(
+    "home, rotation",
+    [
+        (Coordinate(0, 2, 0), 1),
+        (Coordinate(-2, 0, 0), 2),
+        (Coordinate(0, -2, 0), 3),
+        (Coordinate(0, 0, 99), 0),
+    ],
+)
+def test_home_controls_start_direction(compass, home, rotation):
+    assert sort_clockwise_sweep(list(reversed(compass)), home) == (
+        compass[rotation:] + compass[:rotation]
+    )
+
+
+def test_same_bearing_is_sorted_near_to_far():
+    near = Coordinate(1, 0, 10)
+    far = Coordinate(2, 0, 20)
+    south = Coordinate(-3, 0, 30)  # centroid remains (0, 0)
+    assert sort_clockwise_sweep([far, south, near]) == [near, far, south]
+
+
+def test_sweep_is_relative_to_centroid_not_coordinate_origin():
+    north = Coordinate(44, -80, 1)
+    east = Coordinate(43, -79, 2)
+    south = Coordinate(42, -80, 3)
+    west = Coordinate(43, -81, 4)
+    assert sort_clockwise_sweep([west, south, east, north]) == [
+        north,
+        east,
+        south,
+        west,
+    ]

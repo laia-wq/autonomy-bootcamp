@@ -51,8 +51,15 @@ WORKDIR /home/builder/ardupilot
 
 # Shallow submodule fetch when the server allows it; fall back to a full
 # fetch for any submodule pinned to a commit a shallow fetch cannot reach.
+# Retry transient network failures within the same layer to keep downloads.
 RUN git submodule update --init --recursive --depth 1 \
-  || git submodule update --init --recursive
+  || { \
+    for attempt in 1 2 3 4 5; do \
+      git -c http.version=HTTP/1.1 submodule update --init --recursive && exit 0; \
+      sleep 2; \
+    done; \
+    exit 1; \
+  }
 
 RUN ./waf configure --board sitl \
   && ./waf copter

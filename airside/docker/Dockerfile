@@ -11,11 +11,23 @@ FROM ros:humble-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Humble's live repository is missing MAVROS binaries (upstream issue #2293).
+# Use the last complete release from the signed ROS snapshot; keep the rest
+# of ROS on the live repository. Pin the messages and library to match.
+RUN gpg --batch --keyserver hkp://keyserver.ubuntu.com:80 \
+      --recv-keys 4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA \
+    && gpg --batch --export 4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA \
+      > /usr/share/keyrings/ros-snapshots.gpg \
+    && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/ros-snapshots.gpg] http://snapshots.ros.org/humble/2026-08-07/ubuntu jammy main' \
+    > /etc/apt/sources.list.d/mavros-snapshot.list
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     geographiclib-tools \
     python3-pip \
-    ros-humble-mavros \
-    ros-humble-mavros-extras \
+    'ros-humble-mavros=2.14.0-*' \
+    'ros-humble-mavros-extras=2.14.0-*' \
+    'ros-humble-mavros-msgs=2.14.0-*' \
+    'ros-humble-libmavconn=2.14.0-*' \
     ros-humble-py-trees \
     ros-humble-py-trees-ros \
   && rm -rf /var/lib/apt/lists/*
